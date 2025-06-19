@@ -1,22 +1,9 @@
-import logging
-import os
-import platform
-import sys
+import logging, os, platform, sys, cv2, numpy as np, yaml, usb.core, errno
 from dataclasses import dataclass
-import cv2
-import hid
-import numpy as np
-import yaml
 from PyQt6.QtCore import Qt, QTimer, QPointF, pyqtSignal, QThread, pyqtSlot, QRectF
 from PyQt6.QtGui import QPixmap, QPainter, QMovie, QIcon, QTransform, QImage, QAction, QPalette, QColor
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QSlider, QWidget, QGraphicsScene, \
     QGraphicsView, QGraphicsPixmapItem, QSystemTrayIcon, QMenu, QStyleFactory, QGraphicsItem, QCheckBox
-
-try:
-    from led_controller_openrgb import LEDController
-    led_controller_enabled = True
-except ImportError:
-    led_controller_enabled = False
 
 if platform.system() == 'Windows':
     import winshell
@@ -28,7 +15,6 @@ logging.basicConfig(level=logging.DEBUG)
 
 VID = 0x1b1c  # Corsair
 PID = 0x0c39  # Corsair LCD Cap for Elite Capellix coolers
-
 
 @dataclass
 class CorsairCommand:
@@ -65,7 +51,6 @@ class CorsairCommand:
     def size(self):
         return self.header_size + self.datalen
 
-
 class UpdateDeviceThread(QThread):
     captureSignal: pyqtSignal = pyqtSignal()
 
@@ -73,13 +58,50 @@ class UpdateDeviceThread(QThread):
         super().__init__()
         self.container = container
         self.main = main_window
-        self.device = hid.device()
-        try:
-            self.device.open(VID, PID)
-        except Exception as e:
-            logging.error(f"Error opening device: {e}")
-            raise
+        self.device, self.interface, self.cfg = self.setup_usb_device(VID, PID)
+        self.interface_number = self.cfg[(0, 0)].bInterfaceNumber
         QTimer.singleShot(0, self.start_timer)
+
+    def setup_usb_device(self, vid: int, pid: int):
+        
+        # Find the USB device
+        device = usb.core.find(idVendor=vid, idProduct=pid)
+        if device is None:
+            raise RuntimeError(f"Corsair LCD device with VID {vid:#04x} and PID {pid:#04x} not found.")
+        
+        # get config
+        cfg = device.get_active_configuration()
+        if cfg is None:
+            cfg = device[0]  # first configuration if no active one
+        interface = cfg[(0, 0)]  # Interface 0, Alt 0
+        
+        # Only Linux: detach kernel driver if active
+        if platform.system() == "Linux":
+            if device.is_kernel_driver_active(interface.bInterfaceNumber):
+                try:
+                    device.detach_kernel_driver(interface.bInterfaceNumber)
+                    print(f"[INFO] Kernel driver for interface {interface.bInterfaceNumber} was successfully detached.")
+                except usb.core.USBError as e:
+                    raise RuntimeError(f"[Error] Could not detach kernel driver: {e}")
+        
+        # Now set configuration
+        try:
+            device.set_configuration()
+        except usb.core.USBError as e:
+            if e.errno == errno.EACCES:
+                raise PermissionError("[Access denied] Please set appropriate udev rules (Linux) or use administrator rights (Windows).")
+            elif e.errno == errno.EBUSY:
+                raise RuntimeError("[Device busy] Device is blocked by another process or the kernel.")
+            else:
+                raise
+        
+        # claim interface
+        try:
+            usb.util.claim_interface(device, interface.bInterfaceNumber)
+        except usb.core.USBError as e:
+            raise RuntimeError(f"[Error] Could not claim interface: {e}")
+
+        return device, interface, cfg
 
     def start_timer(self):
         self.update_lcd_timer = QTimer()
@@ -134,13 +156,18 @@ class UpdateDeviceThread(QThread):
             part_num += 1
 
     def write_command(self, data):
+        # Search for OUT endpoint
+        endpoint_out = usb.util.find_descriptor(
+            self.cfg[(0, 0)],
+            # match OUT endpoint
+            custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
+        )
         try:
             commands = self.make_commands(data)
             for command in commands:
-                self.device.write(command.to_bytes())
+                self.device.write(endpoint_out.bEndpointAddress, command.to_bytes())
         except Exception as e:
             logging.error(f"Error writing command to device: {e}")
-
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -153,10 +180,6 @@ class MainWindow(QMainWindow):
         self.tray_icon.setIcon(QIcon('icon.ico'))
 
         self.window_state_handler = WindowStateHandler(self)
-        if led_controller_enabled:
-            self.led_controller = LEDController(self)
-        else:
-            logging.debug("LED controller is not enabled")
 
         self.current_image_path = None
         self.last_pixmap_pos = None
@@ -165,12 +188,12 @@ class MainWindow(QMainWindow):
         self.last_scene_rect = None
         self.last_scrollbar_pos = None
 
-        self.setWindowTitle('Corsair LCD Tool')
+        self.setWindowTitle('Corsair LCD Tool v2')
         self.setFixedSize(600, 650)
 
         self.container = QWidget(self)
         self.container.setGeometry(60, 20, 480, 480)
-        self.container.setStyleSheet("background-color: #282c34; border: 0px")
+        self.container.setStyleSheet("border: 0px")
 
         self.scene = QGraphicsScene(self.container)
         self.view = NoScrollGraphicsView(self.scene, self.container)
@@ -286,27 +309,34 @@ class MainWindow(QMainWindow):
                     os.remove(self.shortcut_path)
                     logging.debug("Shortcut removed.")
         elif platform.system() == "Linux":
-            service_content = f"""[Unit]
+            service_name = os.path.basename(self.script_path).replace(".py", ".service")
+            service_path = os.path.join(os.path.expanduser("~"), ".config/systemd/user", service_name)
 
+            service_content = f"""[Unit]
     Description=Corsair LCD Tool
 
     [Service]
     ExecStart={self.python_path} {self.script_path}
+    Restart=on-failure
 
     [Install]
     WantedBy=default.target
     """
-            service_path = os.path.join(os.path.expanduser("~"), ".config/systemd/user", f"{os.path.basename(self.script_path)}.service")
+
+            os.makedirs(os.path.dirname(service_path), exist_ok=True)
+
             if state:
                 with open(service_path, 'w') as f:
                     f.write(service_content)
+
                 subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-                subprocess.run(["systemctl", "--user", "enable", os.path.basename(self.script_path)], check=True)
+                subprocess.run(["systemctl", "--user", "enable", service_name], check=True)
                 logging.debug("Systemd user service created and enabled.")
             else:
                 if os.path.exists(service_path):
                     os.remove(service_path)
                     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+                    subprocess.run(["systemctl", "--user", "disable", service_name], check=True)
                     logging.debug("Systemd user service removed.")
 
     def open_image(self):
@@ -319,46 +349,64 @@ class MainWindow(QMainWindow):
             self.current_image_path = file_name
             self.save_state_handler.restart_save_image_state_timer()
 
+    def create_circular_mask_overlay(self, size: int) -> QPixmap:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor(0, 0, 0, 50))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(0, 0, size, size)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.drawEllipse(0, 0, size, size)
+        painter.end()
+        return pixmap
+
     def load_new_image(self, file_name):
         logging.debug(f"Loading a new image: {file_name}")
-
         self.scene.clear()
-
         if file_name.lower().endswith('.gif'):
             self.load_new_gif(file_name)
-        else:
-            if self.movie is not None:
-                self.movie.stop()
-                self.movie.deleteLater()
-                self.movie = None
-
-            pixmap = QPixmap(file_name)
-
-            self.pixmap_item = QGraphicsPixmapItem(pixmap)
-
-            self.pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-
-            self.scene.addItem(self.pixmap_item)
-
-            self.slider.setEnabled(True)
+            return 
+        if self.movie is not None:
+            self.movie.stop()
+            self.movie.deleteLater()
+            self.movie = None
+        # load the image
+        pixmap = QPixmap(file_name)
+        self.pixmap_item = QGraphicsPixmapItem(pixmap)
+        self.pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+        self.pixmap_item.setZValue(1)
+        # create a circular mask overlay
+        mask_pixmap = self.create_circular_mask_overlay(480)
+        mask_item = QGraphicsPixmapItem(mask_pixmap)
+        mask_item.setOffset(0, 0)
+        # to ensure the circle mask is on top
+        mask_item.setZValue(10)
+        self.scene.addItem(self.pixmap_item)
+        self.scene.addItem(mask_item)
+        self.slider.setEnabled(True)
 
     def load_new_gif(self, file_name):
         if self.movie is not None:
             self.movie.stop()
             self.movie.deleteLater()
-
         self.movie = QMovie(file_name)
-
         self.pixmap_item = QGraphicsPixmapItem()
-
         self.pixmap_item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-
+        self.pixmap_item.setZValue(1)
         self.scene.addItem(self.pixmap_item)
-
-        self.movie.frameChanged.connect(lambda: self.pixmap_item.setPixmap(QPixmap.fromImage(self.movie.currentImage())))
-
+        # create a circular mask overlay
+        mask_pixmap = self.create_circular_mask_overlay(480)
+        mask_item = QGraphicsPixmapItem(mask_pixmap)
+        mask_item.setOffset(0, 0)
+        mask_item.setZValue(10)
+        self.scene.addItem(mask_item)
+        # update the image on frame change
+        self.movie.frameChanged.connect(
+            lambda: self.pixmap_item.setPixmap(QPixmap.fromImage(self.movie.currentImage()))
+        )
         self.movie.start()
-
         self.slider.setEnabled(True)
 
     def reset_image(self):
@@ -383,7 +431,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.error(f"Error in capture_container: {e}")
             return QImage()
-
 
 class SaveStateHandler:
     def __init__(self, main_window):
@@ -502,7 +549,6 @@ class SaveStateHandler:
         except Exception as e:
             logging.error(f"Error in restart_save_image_state_timer: {e}")
 
-
 class WindowStateHandler:
     def __init__(self, main_window):
         self.main = main_window
@@ -527,7 +573,6 @@ class WindowStateHandler:
         except Exception as e:
             logging.error(f"Error in minimize_window: {e}")
 
-
 class NoScrollGraphicsView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -539,12 +584,11 @@ class NoScrollGraphicsView(QGraphicsView):
     def wheelEvent(self, event):
         pass
 
-
 if __name__ == "__main__":
     try:
         app = QApplication(sys.argv)
         window = MainWindow()
         window.show()
-        sys.exit(app.exec())
+        sys.exit(app.exec()) 
     except Exception as e:
         logging.error(f"Error in main: {e}")
