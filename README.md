@@ -7,9 +7,11 @@ This is a fork of [corsair_lcd_tool](https://github.com/UDPSendToFailed/corsair_
 - Low resources usage compared to iCUE.
 
 # Planned Features
-- .rpm installer
 - Overlay text
 - Implement temperatures
+
+# TODO:
+- fix tray icon with .rpm
 
 # Usage
 - Install [Python](https://www.python.org/downloads/ "Python") 3.6 or newer.
@@ -28,7 +30,7 @@ It might work on Windows but to get sure use the original [corsair_lcd_tool by U
 
 # WHY
 Because Corsair decided to do nothing for Linux users.
-If I have some time I might also integrate RGB Controllers in another repo!
+If I have some time I might also integrate RGB Controllers in another repo with a fork of this!
 
 # Thanks to
 - [UDPSendToFailed](https://github.com/UDPSendToFailed "UDPSendToFailed") for the work. The main functionality is all in [corsair_lcd_tool](https://github.com/UDPSendToFailed/corsair_lcd_tool "corsair_lcd_tool")

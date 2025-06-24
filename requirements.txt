@@ -1,7 +1,5 @@
-hidapi
 numpy
 opencv-python
-openrgb-python
 PyQt6
 pyyaml
 winshell

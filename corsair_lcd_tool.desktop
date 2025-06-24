@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Corsair LCD Tool v2
+Comment=Manage Corsair LCD screens
+Exec=corsair-lcd-tool
+Icon=corsair-lcd-tool
+Terminal=false
+Type=Application
+Categories=Utility;System;

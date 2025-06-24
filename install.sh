@@ -10,4 +10,4 @@ sudo cp udev/99-corsair.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
-echo "✅ Done! Please replug the USB device now."
+echo "✅ Done!"

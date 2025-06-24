@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import logging, os, platform, sys, cv2, numpy as np, yaml, usb.core, errno
 from dataclasses import dataclass
 from PyQt6.QtCore import Qt, QTimer, QPointF, pyqtSignal, QThread, pyqtSlot, QRectF
@@ -5,10 +6,13 @@ from PyQt6.QtGui import QPixmap, QPainter, QMovie, QIcon, QTransform, QImage, QA
 from PyQt6.QtWidgets import QApplication, QMainWindow, QPushButton, QFileDialog, QSlider, QWidget, QGraphicsScene, \
     QGraphicsView, QGraphicsPixmapItem, QSystemTrayIcon, QMenu, QStyleFactory, QGraphicsItem, QCheckBox
 
-if platform.system() == 'Windows':
-    import winshell
-elif platform.system() == 'Linux':
-    import subprocess
+match platform.system():
+    case 'Windows':
+        import winshell
+    case 'Linux':
+        pass
+    case _:
+        raise RuntimeError("Unsupported platform. This script is designed for Windows or Linux.")
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -89,7 +93,11 @@ class UpdateDeviceThread(QThread):
             device.set_configuration()
         except usb.core.USBError as e:
             if e.errno == errno.EACCES:
-                raise PermissionError("[Access denied] Please set appropriate udev rules (Linux) or use administrator rights (Windows).")
+                match platform.system():
+                    case 'Windows':
+                        raise PermissionError("[Access denied] Please use administrator rights.")
+                    case 'Linux':
+                        raise PermissionError("[Access denied] Please set appropriate udev rules.")
             elif e.errno == errno.EBUSY:
                 raise RuntimeError("[Device busy] Device is blocked by another process or the kernel.")
             else:
@@ -177,7 +185,9 @@ class MainWindow(QMainWindow):
         self.pixmap_item.setPos(QPointF(0, 0))
 
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon('icon.ico'))
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        icon_path = os.path.join(script_dir, 'corsair-lcd-tool.png')
+        self.tray_icon.setIcon(QIcon(icon_path))
 
         self.window_state_handler = WindowStateHandler(self)
 
@@ -193,7 +203,8 @@ class MainWindow(QMainWindow):
 
         self.container = QWidget(self)
         self.container.setGeometry(60, 20, 480, 480)
-        self.container.setStyleSheet("border: 0px")
+        # black background so the empty space is not visible on the LCD
+        self.container.setStyleSheet("background-color: #000000; border: 0px")
 
         self.scene = QGraphicsScene(self.container)
         self.view = NoScrollGraphicsView(self.scene, self.container)
@@ -219,16 +230,14 @@ class MainWindow(QMainWindow):
 
         if platform.system() == "Windows":
             self.startup_folder = winshell.startup()
-
             self.shortcut_path = os.path.join(self.startup_folder, 'corsair_lcd_tool.lnk')
-        else:
-            pass
 
         self.python_path = sys.executable
 
-        self.startup_checkbox = QCheckBox("Run at startup", self)
-        self.startup_checkbox.setGeometry(60, 580, 120, 30)
-        self.startup_checkbox.clicked.connect(self.update_startup)
+        if platform.system() == "Windows":
+            self.startup_checkbox = QCheckBox("Run at startup", self)
+            self.startup_checkbox.setGeometry(60, 580, 120, 30)
+            self.startup_checkbox.clicked.connect(self.update_startup)
 
         self.slider = QSlider(Qt.Orientation.Horizontal, self)
         self.slider.setGeometry(60, 510, 480, 20)
@@ -250,7 +259,7 @@ class MainWindow(QMainWindow):
 
         self.tray_icon.setContextMenu(self.tray_menu)
 
-        self.setWindowIcon(QIcon('icon.ico'))
+        self.setWindowIcon(QIcon(icon_path))
         self.movie = None
 
         logging.debug("MainWindow initialized")
@@ -284,10 +293,11 @@ class MainWindow(QMainWindow):
         self.save_state_handler = SaveStateHandler(self)
         self.save_state_handler.load_image_state()
 
-        if not self.startup_checkbox.isChecked():
-            self.show()
-        else:
-            QTimer.singleShot(5, self.window_state_handler.minimize_window)
+        if platform.system() == "Windows":
+            if not self.startup_checkbox.isChecked():
+                self.show()
+            else:
+                QTimer.singleShot(5, self.window_state_handler.minimize_window)
         logging.debug("UI Initialized")
 
     def update_startup(self):
@@ -308,36 +318,6 @@ class MainWindow(QMainWindow):
                 if os.path.exists(self.shortcut_path):
                     os.remove(self.shortcut_path)
                     logging.debug("Shortcut removed.")
-        elif platform.system() == "Linux":
-            service_name = os.path.basename(self.script_path).replace(".py", ".service")
-            service_path = os.path.join(os.path.expanduser("~"), ".config/systemd/user", service_name)
-
-            service_content = f"""[Unit]
-    Description=Corsair LCD Tool
-
-    [Service]
-    ExecStart={self.python_path} {self.script_path}
-    Restart=on-failure
-
-    [Install]
-    WantedBy=default.target
-    """
-
-            os.makedirs(os.path.dirname(service_path), exist_ok=True)
-
-            if state:
-                with open(service_path, 'w') as f:
-                    f.write(service_content)
-
-                subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-                subprocess.run(["systemctl", "--user", "enable", service_name], check=True)
-                logging.debug("Systemd user service created and enabled.")
-            else:
-                if os.path.exists(service_path):
-                    os.remove(service_path)
-                    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-                    subprocess.run(["systemctl", "--user", "disable", service_name], check=True)
-                    logging.debug("Systemd user service removed.")
 
     def open_image(self):
         logging.debug("Entering open_image function")
@@ -354,7 +334,7 @@ class MainWindow(QMainWindow):
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(QColor(0, 0, 0, 50))
+        painter.setBrush(QColor(0, 0, 0, 150))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(0, 0, size, size)
         painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
@@ -473,7 +453,8 @@ class SaveStateHandler:
                             self.main.slider.setValue(state.get('last_slider_value'))
                             self.main.view.horizontalScrollBar().setValue(state.get('last_scrollbar_pos')[0])
                             self.main.view.verticalScrollBar().setValue(state.get('last_scrollbar_pos')[1])
-                            self.main.startup_checkbox.setChecked(state.get('startup_checkbox_state', False))
+                            if platform.system() == "Windows":
+                                self.main.startup_checkbox.setChecked(state.get('startup_checkbox_state', False))
                             logging.debug(f"Loaded state: {state}")
                         else:
                             logging.warning(
@@ -504,9 +485,10 @@ class SaveStateHandler:
                     'last_scene_rect': [self.main.scene.sceneRect().x(), self.main.scene.sceneRect().y(),
                                       self.main.scene.sceneRect().width(), self.main.scene.sceneRect().height()],
                     'last_scrollbar_pos': [self.main.view.horizontalScrollBar().value(),
-                                         self.main.view.verticalScrollBar().value()],
-                    'startup_checkbox_state': self.main.startup_checkbox.isChecked()
+                                         self.main.view.verticalScrollBar().value()]
                 }
+                if sys.platform.startswith("win"):
+                    state['startup_checkbox_state'] = self.main.startup_checkbox.isChecked()
                 with open('state.yaml', 'w') as file:
                     yaml.dump(state, file)
                 logging.debug(f"Saved state to disk: {state}")
