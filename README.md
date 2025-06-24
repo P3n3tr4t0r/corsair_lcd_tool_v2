@@ -10,9 +10,6 @@ This is a fork of [corsair_lcd_tool](https://github.com/UDPSendToFailed/corsair_
 - Overlay text
 - Implement temperatures
 
-# TODO:
-- fix tray icon with .rpm
-
 # Usage
 - Install [Python](https://www.python.org/downloads/ "Python") 3.6 or newer.
 - Clone the repo or download as ZIP and extract it to a new folder.
